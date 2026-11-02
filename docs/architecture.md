@@ -140,6 +140,79 @@ sequenceDiagram
 In the local backend, the save targets browser-accessible files instead; a Git commit is optional
 and uses the configured remote Git service when one is available.
 
+## Extending the CMS
+
+There is no plugin API for backends or deployment providers; both are extended by changing the
+core. Paths below are under `src/lib/`.
+
+### Adding a Git service
+
+Bitbucket and Azure DevOps are listed in `unsupportedBackends` in `services/backends/index.js`.
+To add a service like these:
+
+1. **Types.** Add the name to `GitBackendName` and a backend configuration typedef in
+   `types/public.js`. The published JSON schema is generated from these types.
+2. **Provider module.** Create `services/backends/git/<name>/`, modelled on `gitea/` or `gitlab/`.
+   Its `index.js` default-exports a `BackendService` (defined in `types/private.js`):
+   - Required: `isGit`, `name`, `label`, `repository`, `init`, `signIn`, `signOut`, `fetchFiles`,
+     `commitChanges`.
+   - Optional for Git services: `fetchLastCommit`, `fetchBlob`, `fetchDirSHA`, `fetchFileCommits`.
+   - Optional features: `workflow` (Editorial Workflow and Open Authoring), `fetchBranchHeadSHA`,
+     `fetchDeployments`, `triggerDeployment`, `checkStatus`.
+   - Existing providers split the work into `api`, `auth`, `files`, `commits`, `user`,
+     `repository`, `fork`, `workflow`, `pull-requests` and `deployment` modules.
+3. **`init()`.** Read `cmsConfig.current.backend` and call `initGitBackend()`
+   (`services/backends/git/shared/init.js`), which fills in the repository info, the OAuth
+   authorization and token URLs, and the REST/GraphQL endpoints.
+4. **Shared plumbing.** Reuse `services/backends/git/shared/` (`api.js`, `auth.js`, `fetch.js`,
+   `tree.js`, `file-cache.js`, `fork.js`, `workflow.js`, `pull-requests.js`) rather than
+   duplicating it.
+5. **Registration.** Add the service to `gitBackendServices` in `git/services.js`, which wraps it
+   with `scopeBackendService` to support `root_dir`, and remove it from `unsupportedBackends`.
+   `validBackendNames` is derived from the registered services.
+6. **Configuration and sign-in.** Update `services/config/parser/backend.js` (validation,
+   defaults, documentation slug) and `services/user/sign-in-options.js`.
+7. **Service-specific branches.** Some shared modules test for a particular service, for example
+   PKCE in `shared/auth.js`, the pull request helpers in `shared/workflow.js`, skip-CI markers in
+   `shared/commits.js`, and `backends/branch-access.js`. Review them for the new service.
+8. **Tests.** Add co-located unit tests; the project enforces full unit-test coverage.
+
+### Supporting a new builder or CI/CD provider
+
+The CMS does not run builds. It reads build results from the Git service, so many providers need
+little or no code.
+
+- Each provider's `deployment.js` turns commit statuses, check runs or deployments into
+  `DeployCandidate` objects. `services/backends/git/shared/deployment.js` chooses one
+  (`pickDeployment`, `resolveDeployments`) and validates its URL.
+- A provider is recognised by name through `PREVIEW_NAME_REGEX`, or explicitly by the user's
+  `preview_context` backend option. Supporting a new builder is often a regex addition.
+- Skip-CI markers for commits are defined in `services/backends/git/shared/commits.js`.
+- A manual deployment uses the user's deploy hook URL, or the backend's `triggerDeployment` if it
+  has one (`services/deployments/publish.js`). GitHub and GitLab implement it; Gitea and Forgejo
+  do not.
+- A builder that reports status somewhere other than the Git service has no extension point and
+  needs new core code.
+
+## Preview customization
+
+The default preview is rendered by Svelte:
+
+- `components/contents/details/preview/entry-preview.svelte` renders each field through
+  `field-preview.svelte`.
+- The per-field components are `components/contents/details/fields/<type>/<type>-preview.svelte`,
+  mapped by the `previews` object in `fields/index.js`.
+
+Sites can customize it in three ways:
+
+| API | Effect | Where it lives |
+| --- | --- | --- |
+| `CMS.registerPreviewStyle()` | Keeps the Svelte preview but renders it in an iframe with the registered stylesheets, optionally limited to a collection or file. | `services/api/methods/register-preview-style.js`, `services/contents/editor/preview-styles.js`, `preview-frame.js` |
+| `CMS.registerPreviewTemplate(name, Component)` | Replaces the preview of a collection or file with a React component rendered in the iframe. The component receives Immutable Maps, and `widgetFor()` mounts the built-in Svelte field previews into it. | `services/api/methods/register-preview-template.js`, `services/api/registries.js`, `services/contents/editor/preview-templates.js`, `components/contents/details/preview/entry-preview-iframe.svelte` |
+| `CMS.registerFieldType()` | Adds a custom field type with its own control and preview. | `services/api/field-types.js`, `components/contents/details/fields/custom/` |
+
+React and Immutable are loaded lazily, so a site that registers no template does not load them.
+
 ## Language, types, and build
 
 Application source is JavaScript (`.js`) and Svelte (`.svelte`), not TypeScript source. Types are
