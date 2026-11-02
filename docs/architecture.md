@@ -213,6 +213,40 @@ Sites can customize it in three ways:
 
 React and Immutable are loaded lazily, so a site that registers no template does not load them.
 
+## Editorial Workflow
+
+Editorial Workflow (and its lighter sibling Preview Workflow) is the only built-in "workflow". There is no workflow engine or definition file: a workflow is a set of **statuses**, **stages** and a **backend implementation** that stores them on the Git service.
+
+### Where state lives
+
+The CMS has no database of its own. The source of truth is the Git service:
+
+| State | Persisted as |
+| --- | --- |
+| An unpublished entry | A branch named `cms/COLLECTION/SLUG` (see `services/workflow/branch.js`) with the entry's files committed to it |
+| Its status | A label on the pull request, prefixed with `cms_label_prefix` (default `sveltia-cms/`; Netlify/Decap prefixes are also read). See `services/workflow/labels.js` |
+| Draft vs. ready | The PR draft flag, set by `updateStatus` |
+| Publishing | Merging the PR (optionally squash, via `squash_merges`), then deleting the branch |
+| Discarding | Closing the PR and deleting the branch |
+| Open Authoring | A branch in the contributor's fork; a draft has no PR until it is handed over for review |
+
+In the browser, state is only a cache: `unpublishedEntries`, `publishingBranches` and related stores in `services/workflow/index.js` (Svelte runes state) are rebuilt from `workflow.fetchPullRequests()` by `services/workflow/load.js`, which polls and refreshes on focus. Other editors' changes are picked up by that reload, and `fetchBranchHead` plus `workflow/conflict.js` detect concurrent writes to the same branch. Deployments of a merged entry are tracked in memory by `workflow/deploy.js`.
+
+### How a workflow is defined
+
+1. **Configuration**: `publish_mode` (site-level or per collection) is `simple`, `preview` or `editorial_workflow`, with options `stages`, `direct_publish` and `allow_incomplete_drafts`. It is parsed and resolved in `services/workflow/config.js` and `services/config/parser/publish-mode.js`.
+2. **Statuses and stages**: `WorkflowStatus` (`draft`, `pending_review`, `pending_publish`, `pending_deletion`) is defined in `types/private.js`. `services/workflow/constants.js` lists `WORKFLOW_STAGES` (board columns, in order), `OPEN_AUTHORING_STAGES` and the i18n label keys. `services/workflow/stages.js` resolves the stages for a collection and answers "what is the next stage?" and "is this the last stage?".
+3. **Backend contract**: `WorkflowBackendService` in `types/private.js`: `fetchPullRequests`, `savePullRequest`, `updateStatus`, `approve`, `withdrawApproval`, `fetchBranchHead`, `fetchMergeState`, `fetchUnchangedPaths`, `publish`, `discard`. It is exposed as the optional `workflow` property of a `BackendService`. GitHub, GitLab and Gitea/Forgejo implement it in `git/*/workflow.js` (plus `workflow-fork.js` for Open Authoring), sharing helpers in `git/shared/workflow.js`. Local and `test-repo` backends have none, so `workflowEnabled` is false for them.
+4. **Orchestration**: `services/workflow/save.js` (`saveWorkflowChanges`, `updateWorkflowStatus`, `publishWorkflowEntry`, `discardWorkflowEntry`, `deleteWorkflowEntry`), with safety checks in `verify.js` (the merge only publishes what the reviewer saw). `entries.js` converts a `WorkflowPullRequest` into an `UnpublishedEntry`, i.e. a normal `Entry` plus a `workflow` property, so the existing editor and list components work unchanged.
+5. **UI**: `components/workflow/` (board page, cards, status menu, publish button, badges). Columns come from `boardStages` in `stages.js`.
+
+### Recipes
+
+- **Add or rename a stage/status**: add it to `WorkflowStatus` and `WORKFLOW_STAGES`/`WORKFLOW_STATUSES`, give it an i18n key in `WORKFLOW_STATUS_LABELS`, check `stages.js` (`resolveStage` maps unknown labels to the nearest earlier stage), the `status-badge.svelte` tone, the public `publish_mode.stages` type and the generated JSON schema. No backend change is needed because the status is just a label named by `getStatusLabel`.
+- **Add a new publish mode**: extend `PublishMode` and the resolution in `workflow/config.js`, then decide in `isWorkflowEnabled` whether it saves to a PR. Update `parser/publish-mode.js` and the public types.
+- **Support workflows on another Git service**: implement `WorkflowBackendService` and set it as `workflow` on the backend (as `github/index.js` does). Store status as a PR label with `getStatusFromLabels`/`replaceStatusLabel`, reuse `saveWorkflowBranch` and `updateLabelledStatus` from `git/shared/workflow.js`, and implement a `workflow-fork.js` only if you want Open Authoring.
+- **Persist extra state**: put it on the PR (label, title, body or branch), not in the browser, so every editor sees it. Add a field to `WorkflowPullRequest` and map it in `convertPullRequest`.
+
 ## Language, types, and build
 
 Application source is JavaScript (`.js`) and Svelte (`.svelte`), not TypeScript source. Types are
